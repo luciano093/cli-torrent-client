@@ -1,6 +1,6 @@
 use clap::Parser;
-use torrent_client2::args::Args;
-use torrent_client2::client::Client;
+use torrent_client::args::Args;
+use torrent_client::client::Client;
 
 fn main() {
     let args = Args::parse();

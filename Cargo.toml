@@ -1,5 +1,5 @@
 [package]
-name = "torrent_client2"
+name = "torrent_client"
 version = "0.1.0"
 edition = "2021"
 
