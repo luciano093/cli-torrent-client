@@ -347,9 +347,7 @@ impl bencode::FromBencode for MetaInfo {
     type Error = Error;
 
     fn from_bencode(bytes: &[u8]) -> Result<Self, Self::Error> where Self: Sized {
-        println!("before");
         let map = bytes.try_into_dict()?.0;
-        println!("after");
 
         let mut info_hash = None;
         let mut info = None;

@@ -4,7 +4,7 @@ use std::{net::SocketAddr, collections::{HashSet, HashMap}, io::{stdout, Write, 
 use bit_vec::BitVec;
 use threadpool::ThreadPool;
 
-use crate::{metainfo::{self, MetaInfo, FileMode}, tracker::{Tracker, self, TrackerRequest, Peers}, peer::{Peer, self, Message}, file::WriteMessage};
+use crate::{metainfo::{self, MetaInfo, FileMode}, tracker::{Tracker, self, TrackerRequest, Peers}, peer::{Peer, self, Message, WriteMessage}};
 
 static BLOCK_SIZE: u32 = 16384;
 

@@ -34,6 +34,30 @@ impl From<io::Error> for Error {
     }
 }
 
+pub struct WriteMessage {
+    index: u32,
+    begin: u32,
+    block: Vec<u8>,
+}
+
+impl WriteMessage {
+    pub fn new(index: u32, begin: u32, block: &[u8]) -> Self {
+        WriteMessage { index, begin, block: block.to_vec() }
+    }
+
+    pub const fn index(&self) -> u32 {
+        self.index
+    }
+
+    pub const fn begin(&self) -> u32 {
+        self.begin
+    }
+
+    pub const fn block(&self) -> &Vec<u8> {
+        &self.block
+    }
+}
+
 #[derive(Debug, PartialEq, PartialOrd)]
 pub enum Message {
     KeepAlive,
