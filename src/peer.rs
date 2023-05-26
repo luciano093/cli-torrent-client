@@ -257,12 +257,24 @@ impl Peer {
         self.is_choking = bool;
     }
 
+    pub fn set_is_interested(&mut self, bool: bool) {
+        self.is_interested = bool;
+    }
+
     pub const fn am_choking(&self) -> bool {
         self.am_choking
     }
 
     pub const fn is_choking(&self) -> bool {
         self.is_choking
+    }
+
+    pub const fn am_interested(&self) -> bool {
+        self.am_interested
+    }
+
+    pub const fn is_interested(&self) -> bool {
+        self.is_interested
     }
 
     pub fn send_unchoke(&mut self) -> Result<(), Error> {

@@ -1,4 +1,3 @@
-use core::num;
 use std::{net::SocketAddr, collections::{HashSet, HashMap}, io::{stdout, Write, Seek}, fmt::Display, fs::OpenOptions, sync::{Arc, RwLock, mpsc}};
 
 use bit_vec::BitVec;
@@ -280,20 +279,16 @@ fn handle_peer(address: SocketAddr, info_hash: [u8; 20], peer_id: [u8; 20], piec
 
     let _peer_handshake = peer.handshake(info_hash, peer_id)?;
 
+    // communication with peer starts here
     let pieces = file_bitfield.read().unwrap().len();
 
     loop {
-        // println!("peer: {} piece: {:?}, offset: {}", address.ip(), downloading_piece.piece, downloading_piece.offset);
-        
         let message = peer.read_message()?;
-        // println!("message: {}", message);
 
         match message {
             Message::KeepAlive => {
-                // closes connection if peer has no interesting piece
+                // closes connection if peer has no piece the file needs
                 if get_next_piece(&peer, &file_bitfield, &currently_downloading) == None {
-                    // println!("closed connection");
-                    
                     return Ok(());
                 }
             },
@@ -303,7 +298,6 @@ fn handle_peer(address: SocketAddr, info_hash: [u8; 20], peer_id: [u8; 20], piec
             Message::Unchoke => {
                 // redundant message
                 if !peer.is_choking() {
-                    // println!("redundant unchoke");
                     continue;
                 }
 
@@ -312,12 +306,11 @@ fn handle_peer(address: SocketAddr, info_hash: [u8; 20], peer_id: [u8; 20], piec
                 if downloading_piece.piece.is_none() {
                     if let Some(next_piece) = get_next_piece(&peer, &file_bitfield, &currently_downloading) {
                         downloading_piece.piece = Some(next_piece);
-                        // println!("sending request for piece: {}", next_piece);
                         currently_downloading.write().unwrap().insert(next_piece);
 
                         peer.send_request(next_piece, downloading_piece.offset, BLOCK_SIZE)?;
                     } else {
-                        // println!("no more pieces");
+                        // no more pieces needed
                         return Ok(());
                     };
                 } else {
@@ -336,24 +329,20 @@ fn handle_peer(address: SocketAddr, info_hash: [u8; 20], peer_id: [u8; 20], piec
                 }
             }
             Message::Interested => {
-                if peer.am_choking() {
-                    // peer.send_unchoke()?;
-                }
+                // todo
             }
             Message::NotInterested => (),
             Message::Have(piece_index) => {
                 peer.update_piece(piece_index as usize);
 
-                if get_next_piece(&peer, &file_bitfield, &currently_downloading).is_some() {
-                    // println!("sending interested");
+                if !peer.am_interested() && get_next_piece(&peer, &file_bitfield, &currently_downloading).is_some() {
                     peer.send_interested()?;
                 }
             }
             Message::Bitfield(bitfield) => {
                 peer.update_bitfield(bitfield);
 
-                if get_next_piece(&peer, &file_bitfield, &currently_downloading).is_some() {
-                    // println!("sending interested");
+                if !peer.am_interested() && get_next_piece(&peer, &file_bitfield, &currently_downloading).is_some() {
                     peer.send_interested()?;
                 }
             }
@@ -381,8 +370,7 @@ fn handle_peer(address: SocketAddr, info_hash: [u8; 20], peer_id: [u8; 20], piec
   
                         peer.send_request(next_piece, 0, BLOCK_SIZE)?;
                     } else {
-                        // println!("no pieces needed");
-                        // exit peer
+                        // no more pieces needed
                         return Ok(());
                     };
                 }
@@ -396,7 +384,7 @@ fn handle_peer(address: SocketAddr, info_hash: [u8; 20], peer_id: [u8; 20], piec
                     peer.send_request(downloading_piece.piece.unwrap(), downloading_piece.offset, BLOCK_SIZE)?;
                 }
             }
-            Message::Cancel { index, begin, length } => println!("cancel piece: {}", index), // peer.cancel_request(index, begin, length)?,
+            Message::Cancel { index, begin, length } => (), // todo (cancels previouslly requested piece)
             _ => (),
         }
     }
