@@ -1,3 +1,4 @@
+use core::num;
 use std::{net::SocketAddr, collections::{HashSet, HashMap}, io::{stdout, Write, Seek}, fmt::Display, fs::OpenOptions, sync::{Arc, RwLock, mpsc}};
 
 use bit_vec::BitVec;
@@ -135,17 +136,19 @@ impl Torrent {
     }
 
     pub fn download(&mut self) {
-        let mut len = 0;
+        let mut file_len = 0;
 
         let (sender, reciever) = mpsc::channel::<WriteMessage>();
 
         println!("pieces: {}, piece length: {}", self.file_bitfield.read().unwrap().len(), self.metainfo.info().piece_length());
         if let FileMode::SingleFile { length, .. } = self.metainfo.info().mode() {
             println!("file len: {}", length);
-            len = *length;
+            file_len = *length;
         }
 
-        let last_piece_length = get_last_piece_length(len as usize, self.metainfo.info().pieces().len(), self.metainfo.info().piece_length() as usize);
+        let num_of_pieces = self.metainfo.info().pieces().len();
+
+        let last_piece_length = get_last_piece_length(file_len as usize, self.metainfo.info().pieces().len(), self.metainfo.info().piece_length() as usize);
 
         let mut file = OpenOptions::new()
             .read(false)
@@ -163,19 +166,26 @@ impl Torrent {
         std::thread::spawn(move || {
             let mut pieces = HashMap::<u32, BitVec>::new();
 
+            for i in 0..num_of_pieces {
+                let block_num = if i != num_of_pieces - 1 {
+                    (piece_length + BLOCK_SIZE - 1) / BLOCK_SIZE // rounds up
+                } else {
+                    (last_piece_length + BLOCK_SIZE - 1) / BLOCK_SIZE // rounds up
+                };
+                
+                pieces.insert(i as u32, BitVec::from_elem(block_num as usize, false));
+            }
+
             for write_message in reciever {
                 // write to file
                 let offset = (write_message.index() as u64 * piece_length as u64) + write_message.begin() as u64;
-                println!("offset: {}", offset);
-                let file_len = file.metadata().unwrap().len();
 
                 file.seek(std::io::SeekFrom::Start(offset)).unwrap();
 
                 file.write_all(&write_message.block()).unwrap();
                 
                 if !pieces.contains_key(&write_message.index()) {
-                    let block_num = (piece_length + BLOCK_SIZE - 1) / BLOCK_SIZE; // round up
-                    pieces.insert(write_message.index(), BitVec::from_elem(block_num as usize, false));
+                    println!("test");
                 }
 
                 let block_index = (write_message.begin() as u64 / BLOCK_SIZE as u64) as usize;
@@ -192,13 +202,23 @@ impl Torrent {
             }
         });
 
-        loop {
+        'main: loop {
+            if self.file_bitfield.read().unwrap().all() {
+                println!("Download finished");
+                break;
+            }
+
             self.tracker.announce().unwrap();
 
             // handle each peer deparately in its own thread
             match self.tracker.response().unwrap().peers() {
                 Peers::Binary(peers) => {
                     for &addr in peers.into_iter() {
+                        if self.file_bitfield.read().unwrap().all() {
+                            println!("Download finished");
+                            break 'main;
+                        }
+
                         // skip if peer is already connected
                         if self.connected_peers.read().unwrap().contains(&addr) {
                             continue;
@@ -339,7 +359,6 @@ fn handle_peer(address: SocketAddr, info_hash: [u8; 20], peer_id: [u8; 20], piec
             }
             Message::Request { index, begin, length } => (), // peer.send_piece(index, begin, length)?,
             Message::Piece { index, begin, block } => {
-                println!("index: {}, begin: {}, block length: {}", index, begin, block.len());
                 sender.send(WriteMessage::new(index, begin, &block)).unwrap();
 
                 downloading_piece.offset += block.len() as u32;
@@ -402,7 +421,7 @@ fn get_next_piece(peer: &Peer, file_bitfield: &RwLock<BitVec>, currently_downloa
     None
 }
 
-fn get_last_piece_length(file_length: usize, pieces: usize, piece_length: usize) -> usize {
+fn get_last_piece_length(file_length: usize, pieces: usize, piece_length: usize) -> u32 {
     let length_without_last_piece = piece_length * (pieces - 1);
-    file_length - length_without_last_piece
+    (file_length - length_without_last_piece) as u32
 }
