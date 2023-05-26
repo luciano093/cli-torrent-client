@@ -186,11 +186,11 @@ impl Peer {
         write!(cursor, "{}BitTorrent protocol00000000", 19 as char)?;
 
         for byte in info_hash {
-            cursor.write(&[byte])?;
+            cursor.write_all(&[byte])?;
         }
 
         for byte in peer_id {
-            cursor.write(&[byte])?;
+            cursor.write_all(&[byte])?;
         }
 
         // send handshake
@@ -294,9 +294,9 @@ impl Peer {
     pub fn send_request(&mut self, index: u32, begin: u32, length: u32) -> Result<(), Error> {
         let mut cursor = Cursor::new(vec![0, 0, 0, 13, 6]);
         cursor.seek(io::SeekFrom::End(0)).unwrap();
-        cursor.write(&index.to_be_bytes())?;
-        cursor.write(&begin.to_be_bytes())?;
-        cursor.write(&length.to_be_bytes())?;
+        cursor.write_all(&index.to_be_bytes())?;
+        cursor.write_all(&begin.to_be_bytes())?;
+        cursor.write_all(&length.to_be_bytes())?;
 
         self.stream.write_all(cursor.get_ref())?;
 

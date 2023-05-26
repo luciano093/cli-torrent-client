@@ -74,9 +74,9 @@ impl FromBencodeType for File {
         let mut md5sum = None;
         let mut path = None;
 
-        let mut iter = dict.iter();
+        let iter = dict.iter();
 
-        while let Some((name, value)) = iter.next() {
+        for (name, value) in iter {
             let name = name.try_into_byte_string().unwrap().0;
 
             match (name, value) {
@@ -86,9 +86,7 @@ impl FromBencodeType for File {
                 (b"md5sum", Type::String(bytes, _)) => {
                     let mut arr = [0u8; 16];
 
-                    for i in 0..16 {
-                        arr[i] = bytes[i];
-                    }
+                    arr[..16].copy_from_slice(&bytes[..16]);
 
                     md5sum = Some(arr);
                 }
@@ -157,7 +155,7 @@ impl FromBencodeType for Info {
     type Error = Error;
 
     fn from_bencode_type(value: &Type) -> Result<Self, Self::Error> where Self: Sized {
-        let mut info_dic = value.try_into_dict()?.0.iter();
+        let info_dic = value.try_into_dict()?.0.iter();
 
         let mut piece_length = None;
         let mut pieces = None;
@@ -167,7 +165,7 @@ impl FromBencodeType for Info {
         let mut md5sum = None;
         let mut files = None;
 
-        while let Some((field_name, value)) = info_dic.next() {
+        for (field_name, value) in info_dic {
             let field_name = field_name.try_into_byte_string()?.0;
 
             match (field_name, value) {
@@ -180,9 +178,7 @@ impl FromBencodeType for Info {
                     for sha1 in bytes.chunks(20) {
                         let mut sha1_arr = [0u8; 20];
 
-                        for i in 0..20 {
-                            sha1_arr[i] = sha1[i];
-                        }
+                        sha1_arr[..20].copy_from_slice(&sha1[..20]);
 
                         vec.push(sha1_arr);
                     }
@@ -207,9 +203,7 @@ impl FromBencodeType for Info {
                 (b"md5sum", Type::String(bytes, _)) => {
                     let mut arr = [0u8; 16];
 
-                    for i in 0..16 {
-                        arr[i] = bytes[i];
-                    }
+                    arr[..16].copy_from_slice(&bytes[..16]);
 
                     md5sum = Some(arr);
                 }
@@ -230,9 +224,7 @@ impl FromBencodeType for Info {
         let pieces = pieces.ok_or(Error::MissingPieces)?;
         let name = name.ok_or(Error::MissingName)?;
 
-        let mode = if files.is_some() {
-            let files = files.unwrap();
-
+        let mode = if let Some(files) = files {
             FileMode::MultipleFiles { files }
         } else {
             let length = length.ok_or(Error::MissingLength)?;
@@ -358,9 +350,9 @@ impl bencode::FromBencode for MetaInfo {
         let mut created_by = None;
         let mut encoding = None;
 
-        let mut iter = map.iter();
+        let iter = map.iter();
 
-        while let Some((name, value)) = iter.next() {
+        for (name, value) in iter {
             let name = name.try_into_byte_string()?.0;
 
             match (name, value) {

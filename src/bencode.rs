@@ -150,7 +150,7 @@ impl<'a> Iterator for Iter<'a> {
             b'l' => {
                 let mut vec = Vec::new();
 
-                while let Some(object) = self.next() {
+                for object in self.by_ref() {
                     let object = match object {
                         Ok(object) => object,
                         err => return Some(err),
@@ -260,7 +260,7 @@ pub trait Bedecode<'a> {
 
 impl<'a> Bedecode<'a> for &'a [u8] {
     fn bedecode(self) -> Result<Type<'a>, Error> where Self: Sized {
-        self.bedecode_iter().next().ok_or_else(|| Error::NotEnoughBytes)?
+        self.bedecode_iter().next().ok_or(Error::NotEnoughBytes)?
     }
 }
 

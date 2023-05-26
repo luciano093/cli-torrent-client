@@ -1,6 +1,3 @@
-use std::net::TcpStream;
-use std::sync::{Mutex, Arc};
-
 use threadpool::ThreadPool;
 
 use crate::{metainfo, torrent};

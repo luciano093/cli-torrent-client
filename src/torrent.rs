@@ -105,7 +105,7 @@ impl Torrent {
         }
 
         let request = TrackerRequest::new(
-            metainfo.info_hash().clone(),
+            *metainfo.info_hash(),
             peer_id,
             6881,
             0,
@@ -181,7 +181,7 @@ impl Torrent {
 
                 file.seek(std::io::SeekFrom::Start(offset)).unwrap();
 
-                file.write_all(&write_message.block()).unwrap();
+                file.write_all(write_message.block()).unwrap();
                 
                 if !pieces.contains_key(&write_message.index()) {
                     println!("test");
@@ -212,7 +212,7 @@ impl Torrent {
             // handle each peer deparately in its own thread
             match self.tracker.response().unwrap().peers() {
                 Peers::Binary(peers) => {
-                    for &addr in peers.into_iter() {
+                    for &addr in peers.iter() {
                         if self.file_bitfield.read().unwrap().all() {
                             println!("Download finished");
                             break 'main;
@@ -232,11 +232,11 @@ impl Torrent {
                         let sender = mpsc::Sender::clone(&sender);
 
                         let connection = move || {
-                            match handle_peer(addr, info_hash, peer_id, piece_length, last_piece_length as u32, file_bitfield, currently_downloading, sender) {
+                            match handle_peer(addr, info_hash, peer_id, piece_length, last_piece_length, file_bitfield, currently_downloading, sender) {
                                 Ok(()) => (),
                                 Err(Error::PeerError(peer::Error::IoError(_))) => (),
                                 Err(err) => {
-                                    stdout().lock().write(format!("{}\n", err).as_bytes()).unwrap();
+                                    stdout().lock().write_all(format!("{}\n", err).as_bytes()).unwrap();
                                     stdout().lock().flush().unwrap();
                                 },
                             };
@@ -288,7 +288,7 @@ fn handle_peer(address: SocketAddr, info_hash: [u8; 20], peer_id: [u8; 20], piec
         match message {
             Message::KeepAlive => {
                 // closes connection if peer has no piece the file needs
-                if get_next_piece(&peer, &file_bitfield, &currently_downloading) == None {
+                if get_next_piece(&peer, &file_bitfield, &currently_downloading).is_none() {
                     return Ok(());
                 }
             },
@@ -358,7 +358,7 @@ fn handle_peer(address: SocketAddr, info_hash: [u8; 20], peer_id: [u8; 20], piec
                     piece_length - downloading_piece.offset
                 };
 
-                if remaining_piece_size <= 0 {
+                if remaining_piece_size == 0 {
                     // Reset the offset to zero for the next piece
                     downloading_piece.offset = 0;
 

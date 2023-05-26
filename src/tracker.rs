@@ -162,20 +162,17 @@ impl FromBencodeType for Peers {
     fn from_bencode_type(value: &Type) -> Result<Self, Self::Error> where Self: Sized {
 
         // parse binary model
-        match value.try_into_byte_string() {
-            Ok((bytes, _)) => {
-                let mut vec = Vec::new();
+        if let Ok((bytes, _)) = value.try_into_byte_string() {
+            let mut vec = Vec::new();
 
-                for addr_bytes in bytes.chunks(6) {
-                    let ip = Ipv4Addr::new(addr_bytes[0], addr_bytes[1], addr_bytes[2], addr_bytes[3]);
-                    let port = u16::from_be_bytes([addr_bytes[4], addr_bytes[5]]);
-                    let addr = SocketAddr::new(IpAddr::V4(ip), port);
-                    vec.push(addr);
-                }
-
-                return Ok(Self::Binary(vec));
+            for addr_bytes in bytes.chunks(6) {
+                let ip = Ipv4Addr::new(addr_bytes[0], addr_bytes[1], addr_bytes[2], addr_bytes[3]);
+                let port = u16::from_be_bytes([addr_bytes[4], addr_bytes[5]]);
+                let addr = SocketAddr::new(IpAddr::V4(ip), port);
+                vec.push(addr);
             }
-            Err(_) => (),
+
+            return Ok(Self::Binary(vec));
         }
 
         // parse dictionary model
@@ -187,9 +184,9 @@ impl FromBencodeType for Peers {
             let mut ip = None;
             let mut port = None;
 
-            let mut iter = dict.try_into_dict()?.0.iter();
+            let iter = dict.try_into_dict()?.0.iter();
 
-            while let Some((name, value)) = iter.next() {
+            for (name, value) in iter {
                 let name = name.try_into_byte_string().unwrap().0;
 
                 match (name, value) {
@@ -269,7 +266,7 @@ impl FromBencode for TrackerResponse {
 
         // find where dictionary begins
         for (i, pair) in bytes.windows(2).enumerate() {
-            if pair[0] == '\n' as u8 && pair[1] == 'd' as u8 {
+            if pair[0] == b'\n' && pair[1] == b'd' {
                 begin = i + 1;
             }
         }
@@ -285,9 +282,9 @@ impl FromBencode for TrackerResponse {
         let mut incomplete = None;
         let mut peers = None;
 
-        let mut iter = map.iter();
+        let iter = map.iter();
 
-        while let Some((name, value)) = iter.next() {
+        for (name, value) in iter {
             let name = name.try_into_byte_string()?.0;
 
             match (name, value) {
@@ -369,7 +366,7 @@ impl Tracker {
             let result = BufReader::new(&self.stream).bytes().collect::<Result<Vec<u8>, std::io::Error>>();
 
             match result {
-                Ok(response) => if response.len() != 0 {
+                Ok(response) => if !response.is_empty() {
                     self.response = match TrackerResponse::from_bencode(&response) {
                         Ok(response) => Some(response),
                         Err(err) => {
