@@ -1,8 +1,17 @@
-use std::{net::SocketAddr, collections::{HashSet, HashMap}, io::{stdout, Write, Seek}, fmt::Display, fs::OpenOptions, sync::{Arc, RwLock, mpsc}};
+use std::net::SocketAddr;
+use std::collections::{HashSet, HashMap};
+use std::io::{stdout, Write};
+use std::fmt::Display;
+use std::sync::{Arc, RwLock, mpsc};
 
 use bit_vec::BitVec;
+use tokio::fs::OpenOptions;
+use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use crate::{metainfo::{self, MetaInfo, FileMode}, tracker::{Tracker, self, TrackerRequest, Peers}, peer::{Peer, self, Message, WriteMessage}};
+
+use crate::metainfo::{self, MetaInfo, FileMode};
+use crate::tracker::{Tracker, self, TrackerRequest, Peers};
+use crate::peer::{Peer, self, Message, WriteMessage};
 
 static BLOCK_SIZE: u32 = 16384;
 
@@ -149,13 +158,14 @@ impl Torrent {
             .write(true)
             .create(true)
             .open(self.metainfo.info().name())
+            .await
             .unwrap();
 
         let bitfield = Arc::clone(&self.file_bitfield);
 
         let piece_length = self.metainfo.info().piece_length();
 
-        std::thread::spawn(move || {
+        tokio::spawn(async move {
             let mut pieces = HashMap::<u32, BitVec>::new();
 
             for i in 0..num_of_pieces {
@@ -172,22 +182,16 @@ impl Torrent {
                 // write to file
                 let offset = (write_message.index() as u64 * piece_length as u64) + write_message.begin() as u64;
 
-                file.seek(std::io::SeekFrom::Start(offset)).unwrap();
-
-                file.write_all(write_message.block()).unwrap();
-                
-                if !pieces.contains_key(&write_message.index()) {
-                    println!("test");
-                }
+                file.seek(std::io::SeekFrom::Start(offset)).await.unwrap();
+                file.write_all(write_message.block()).await.unwrap();
 
                 let block_index = (write_message.begin() as u64 / BLOCK_SIZE as u64) as usize;
                 pieces.get_mut(&write_message.index()).unwrap().set(block_index, true);
 
                 if pieces[&write_message.index()].all() {
-                    file.flush().unwrap();
-                    file.sync_all().unwrap();
                     println!("piece {} completed", write_message.index());
                     bitfield.write().unwrap().set(write_message.index() as usize, true);
+                    file.sync_all().await.unwrap();
                 }
             }
         });
