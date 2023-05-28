@@ -2,16 +2,14 @@ use clap::Parser;
 use torrent_client::args::Args;
 use torrent_client::client::Client;
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let args = Args::parse();
 
     let client = Client::new();
 
-    match client.download(&args.torrent_file) {
-        Ok(_) => (),
-        Err(err) => {
-            eprintln!("Error: {:?}", err);
-            std::process::exit(-1);
-        }
+    if let Err(err) = client.download(&args.torrent_file).await {
+        eprintln!("Error: {:?}", err);
+        std::process::exit(-1)
     }
 }

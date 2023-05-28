@@ -1,14 +1,14 @@
 use std::fmt::Display;
-use std::net::{SocketAddr, TcpStream};
-use std::io::{self, Write, Cursor, Seek, Read, BufReader};
-use std::time::Duration;
+use std::io::{self, Cursor, Seek, Write};
 
 use bit_vec::BitVec;
+use tokio::io::{BufReader, AsyncWriteExt, AsyncReadExt};
+use tokio::net::TcpStream;
+use tokio::net::tcp::{ReadHalf, WriteHalf};
 
 #[derive(Debug)]
 pub enum Error {
     IoError(io::Error),
-    NotEnoughBytes { expected: usize, actual: usize },
     InvalidMessageId(u8),
     InvalidPayloadLength { expected: usize, actual: usize },
 }
@@ -17,8 +17,6 @@ impl Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::IoError(err) => write!(f, "{}", err),
-            Self::NotEnoughBytes { expected, actual} => 
-                write!(f, "Expected {} bytes but got: {}", expected, actual),
             Self::InvalidMessageId(id) => write!(f, "Invalid message id: {}", id),
             Self::InvalidPayloadLength { expected, actual } =>
                 write!(f, "Expected payload of length {} but got {}", expected, actual),
@@ -151,9 +149,9 @@ impl Message {
     }
 }
 
-pub struct Peer {
-    stream: TcpStream,
-    reader: BufReader<TcpStream>,
+pub struct Peer<'a> {
+    reader: BufReader<ReadHalf<'a>>,
+    writer: WriteHalf<'a>,
     is_choking: bool,
     is_interested: bool,
     am_choking: bool,
@@ -161,14 +159,14 @@ pub struct Peer {
     bitfield: BitVec,
 }
 
-impl Peer {
-    pub fn connect(addr: SocketAddr, num_pieces: usize) -> Result<Self, Error> {
-        let stream = TcpStream::connect_timeout(&addr, Duration::from_millis(200))?;
-        let reader = BufReader::new(stream.try_clone()?);
+impl<'a> Peer<'a> {
+    pub async fn new(stream: &'a mut TcpStream, num_pieces: usize) -> Result<Peer<'a>, Error> {
+        let (reader, writer) = stream.split();
+        let reader = BufReader::new(reader);
         
         Ok(Peer {
-            stream,
             reader,
+            writer,
             is_choking: true,
             is_interested: false,
             am_interested: false,
@@ -177,7 +175,7 @@ impl Peer {
         })
     }
 
-    pub fn handshake(&mut self, info_hash: [u8; 20], peer_id: [u8; 20]) -> Result<[u8; 68], Error> {
+    pub async fn handshake(&mut self, info_hash: [u8; 20], peer_id: [u8; 20]) -> Result<[u8; 68], Error> {
         // prepare handshake
 
         let mut cursor = Cursor::new(vec![0u8; 68]);
@@ -186,16 +184,16 @@ impl Peer {
         write!(cursor, "{}BitTorrent protocol00000000", 19 as char)?;
 
         for byte in info_hash {
-            cursor.write_all(&[byte])?;
+            AsyncWriteExt::write_all(&mut cursor, &[byte]).await?;
         }
 
         for byte in peer_id {
-            cursor.write_all(&[byte])?;
+            AsyncWriteExt::write_all(&mut cursor, &[byte]).await?;
         }
 
         // send handshake
 
-        self.stream.write_all(cursor.get_ref())?;
+        self.writer.write_all(cursor.get_ref()).await?;
 
         // read response handshake
         // loops until it connects or gives an error
@@ -203,19 +201,19 @@ impl Peer {
         loop {
             let mut handshake = [0u8; 68];
 
-            match self.reader.read(&mut handshake) {
+            match self.reader.read(&mut handshake).await {
                 Ok(received) if received == 68 => break Ok(handshake), 
-                Ok(received) => break Err(Error::NotEnoughBytes { expected: 68, actual: received }),
+                Ok(_) => continue,
                 Err(err) if err.kind() == io::ErrorKind::TimedOut => continue,
                 Err(err) => break Err(err.into()),
             }
         }
     }
 
-    pub fn read_message(&mut self) -> Result<Message, Error> {
+    pub async fn read_message(&mut self) -> Result<Message, Error> {
         // read length of message
         let mut len = [0u8; 4];
-        self.reader.read_exact(&mut len)?;
+        self.reader.read_exact(&mut len).await?;
     
         let len = u32::from_be_bytes(len);
 
@@ -226,7 +224,7 @@ impl Peer {
 
         // Read message id
         let mut id = [0u8; 1];
-        self.reader.read_exact(&mut id)?;
+        self.reader.read_exact(&mut id).await?;
 
         let id = id[0];
 
@@ -239,7 +237,7 @@ impl Peer {
 
         if payload_len > 0 {
             let mut payload = vec![0; payload_len];
-            self.reader.read_exact(&mut payload)?;
+            self.reader.read_exact(&mut payload).await?;
 
             // Construct and return the message
             Ok(Message::from_id_and_payload(id, payload)?)
@@ -277,28 +275,28 @@ impl Peer {
         self.is_interested
     }
 
-    pub fn send_unchoke(&mut self) -> Result<(), Error> {
-        self.stream.write_all(&[0, 0, 0, 1, 1])?;
+    pub async fn send_unchoke(&mut self) -> Result<(), Error> {
+        self.writer.write_all(&[0, 0, 0, 1, 1]).await?;
         self.am_choking = false;
 
         Ok(())
     }
 
-    pub fn send_interested(&mut self) -> Result<(), Error> {
-        self.stream.write_all(&[0, 0, 0, 1, 2])?;
+    pub async fn send_interested(&mut self) -> Result<(), Error> {
+        self.writer.write_all(&[0, 0, 0, 1, 2]).await?;
         self.am_interested = true;
 
         Ok(())
     }
 
-    pub fn send_request(&mut self, index: u32, begin: u32, length: u32) -> Result<(), Error> {
+    pub async fn send_request(&mut self, index: u32, begin: u32, length: u32) -> Result<(), Error> {
         let mut cursor = Cursor::new(vec![0, 0, 0, 13, 6]);
         cursor.seek(io::SeekFrom::End(0)).unwrap();
-        cursor.write_all(&index.to_be_bytes())?;
-        cursor.write_all(&begin.to_be_bytes())?;
-        cursor.write_all(&length.to_be_bytes())?;
+        AsyncWriteExt::write_all(&mut cursor, &index.to_be_bytes()).await?;
+        AsyncWriteExt::write_all(&mut cursor, &begin.to_be_bytes()).await?;
+        AsyncWriteExt::write_all(&mut cursor, &length.to_be_bytes()).await?;
 
-        self.stream.write_all(cursor.get_ref())?;
+        self.writer.write_all(cursor.get_ref()).await?;
 
         Ok(())
     }

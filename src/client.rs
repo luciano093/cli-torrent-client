@@ -1,12 +1,11 @@
-use threadpool::ThreadPool;
-
 use crate::{metainfo, torrent};
 use crate::torrent::Torrent;
 
 #[derive(Debug)]
 pub enum Error {
     MetaInfoError(metainfo::Error),
-    TorrentError(torrent::Error)
+    TorrentError(torrent::Error),
+    JoinError(tokio::task::JoinError),
 }
 
 impl From<metainfo::Error> for Error {
@@ -21,30 +20,34 @@ impl From<torrent::Error> for Error {
     }
 }
 
-pub struct Client {
-    thread_pool: ThreadPool
+impl From<tokio::task::JoinError> for Error {
+    fn from(value: tokio::task::JoinError) -> Self {
+        Self::JoinError(value)
+    }
 }
 
-impl Client {
-    pub fn new() -> Self {
-        let thread_pool = ThreadPool::new(4);
+pub struct Client { }
 
-        Client { 
-            thread_pool
-        }
+impl Client {
+    pub const fn new() -> Self {
+        Client { }
     }
 
     /// `torrent_file` may be passed as a magnet link or path to file
-    pub fn download(&self, torrent: &str) -> Result<(), Error> {
-        let mut torrent = Torrent::new(torrent)?;
+    pub async fn download(&self, torrent: &str) -> Result<(), Error> {
+        let torrent = torrent.to_string();
 
-        let task = move || {
-            torrent.download();
-        };
+        tokio::spawn(async move {
+            let mut torrent = Torrent::new(&torrent).await?;
+            torrent.download().await;
 
-        self.thread_pool.execute(task);
-        self.thread_pool.join();
+            Ok(())
+        }).await?
+    }
+}
 
-        Ok(())
+impl Default for Client {
+    fn default() -> Self {
+        Client::new()
     }
 }

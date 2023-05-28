@@ -1,8 +1,7 @@
 use std::{net::SocketAddr, collections::{HashSet, HashMap}, io::{stdout, Write, Seek}, fmt::Display, fs::OpenOptions, sync::{Arc, RwLock, mpsc}};
 
 use bit_vec::BitVec;
-use threadpool::ThreadPool;
-
+use tokio::net::TcpStream;
 use crate::{metainfo::{self, MetaInfo, FileMode}, tracker::{Tracker, self, TrackerRequest, Peers}, peer::{Peer, self, Message, WriteMessage}};
 
 static BLOCK_SIZE: u32 = 16384;
@@ -70,14 +69,13 @@ pub struct Torrent {
     metainfo: MetaInfo,
     tracker: Tracker,
     connected_peers: Arc<RwLock<HashSet<SocketAddr>>>,
-    peer_thread_pool: ThreadPool,
     file_bitfield: Arc<RwLock<BitVec>>,
     pieces_currently_downloading: Arc<RwLock<HashSet<u32>>>,
 }
 
 impl Torrent {
     /// Creates a new torrent and connects to the first tracker given by the metainfo
-    pub fn new(torrent: &str) -> Result<Self, Error> {
+    pub async fn new(torrent: &str) -> Result<Self, Error> {
         let metainfo = MetaInfo::try_from(torrent)?;
 
         // calculate how many bytes the torrent needs to download
@@ -115,9 +113,7 @@ impl Torrent {
             false
         );
 
-        let tracker = Tracker::connect(metainfo.announce(), &request)?;
-        
-        let peer_thread_pool = ThreadPool::new(12);
+        let tracker = Tracker::connect(metainfo.announce(), &request).await?;
 
         let file_bitfield = Arc::new(RwLock::new(BitVec::from_elem(metainfo.info().pieces().len(), false)));
 
@@ -128,13 +124,12 @@ impl Torrent {
             metainfo,
             tracker,
             connected_peers: Arc::new(RwLock::new(HashSet::new())),
-            peer_thread_pool,
             file_bitfield,
             pieces_currently_downloading: Arc::new(RwLock::new(HashSet::new())),
         })
     }
 
-    pub fn download(&mut self) {
+    pub async fn download(&mut self) {
         let mut file_len = 0;
 
         let (sender, reciever) = mpsc::channel::<WriteMessage>();
@@ -155,8 +150,6 @@ impl Torrent {
             .create(true)
             .open(self.metainfo.info().name())
             .unwrap();
-
-        // file.set_len(len);
 
         let bitfield = Arc::clone(&self.file_bitfield);
 
@@ -190,8 +183,6 @@ impl Torrent {
                 let block_index = (write_message.begin() as u64 / BLOCK_SIZE as u64) as usize;
                 pieces.get_mut(&write_message.index()).unwrap().set(block_index, true);
 
-                // println!("piece: {} offset: {} max {}, block size: {}", write_message.index(), write_message.begin(), piece_length, write_message.block().len());
-
                 if pieces[&write_message.index()].all() {
                     file.flush().unwrap();
                     file.sync_all().unwrap();
@@ -207,7 +198,7 @@ impl Torrent {
                 break;
             }
 
-            self.tracker.announce().unwrap();
+            self.tracker.announce().await.unwrap();
 
             // handle each peer deparately in its own thread
             match self.tracker.response().unwrap().peers() {
@@ -231,8 +222,8 @@ impl Torrent {
                         let currently_downloading = Arc::clone(&self.pieces_currently_downloading);
                         let sender = mpsc::Sender::clone(&sender);
 
-                        let connection = move || {
-                            match handle_peer(addr, info_hash, peer_id, piece_length, last_piece_length, file_bitfield, currently_downloading, sender) {
+                        let connection = async move {
+                            match handle_peer(addr, info_hash, peer_id, piece_length, last_piece_length, file_bitfield, currently_downloading, sender).await {
                                 Ok(()) => (),
                                 Err(Error::PeerError(peer::Error::IoError(_))) => (),
                                 Err(err) => {
@@ -247,16 +238,13 @@ impl Torrent {
                         //connection();
 
                         self.connected_peers.write().unwrap().insert(addr);
-                        self.peer_thread_pool.execute(connection);
+                        tokio::spawn(connection);
                     }
                 },
                 Peers::Dictionary(_peers) => {
                     todo!()
                 },
             };
-
-            self.peer_thread_pool.join();
-
         }
 
         // send "completed" event to tracker
@@ -271,19 +259,23 @@ impl Torrent {
     }
 }
 
-fn handle_peer(address: SocketAddr, info_hash: [u8; 20], peer_id: [u8; 20], piece_length: u32, last_piece_length: u32, file_bitfield: Arc<RwLock<BitVec>>, currently_downloading: Arc<RwLock<HashSet<u32>>>, sender: mpsc::Sender<WriteMessage>) -> Result<(), Error> {
+async fn handle_peer(address: SocketAddr, info_hash: [u8; 20], peer_id: [u8; 20], piece_length: u32, last_piece_length: u32, file_bitfield: Arc<RwLock<BitVec>>, currently_downloading: Arc<RwLock<HashSet<u32>>>, sender: mpsc::Sender<WriteMessage>) -> Result<(), Error> {
     // connects and sends handshake
-    let mut peer = Peer::connect(address, file_bitfield.read().unwrap().len())?;
+    let pieces = file_bitfield.read().unwrap().len();
+
+    let mut stream = match TcpStream::connect(address).await {
+        Ok(stream) => stream,
+        Err(err) => return Err(peer::Error::IoError(err).into()),
+    };
+
+    let mut peer = Peer::new(&mut stream, pieces).await?;
 
     let mut downloading_piece = DownloadingPiece::new(Arc::clone(&currently_downloading));
 
-    let _peer_handshake = peer.handshake(info_hash, peer_id)?;
-
-    // communication with peer starts here
-    let pieces = file_bitfield.read().unwrap().len();
+    let _peer_handshake = peer.handshake(info_hash, peer_id).await?;
 
     loop {
-        let message = peer.read_message()?;
+        let message = peer.read_message().await?;
 
         match message {
             Message::KeepAlive => {
@@ -308,7 +300,7 @@ fn handle_peer(address: SocketAddr, info_hash: [u8; 20], peer_id: [u8; 20], piec
                         downloading_piece.piece = Some(next_piece);
                         currently_downloading.write().unwrap().insert(next_piece);
 
-                        peer.send_request(next_piece, downloading_piece.offset, BLOCK_SIZE)?;
+                        peer.send_request(next_piece, downloading_piece.offset, BLOCK_SIZE).await?;
                     } else {
                         // no more pieces needed
                         return Ok(());
@@ -322,9 +314,9 @@ fn handle_peer(address: SocketAddr, info_hash: [u8; 20], peer_id: [u8; 20], piec
 
                     // sends request for smaller block size if needed
                     if remaining_piece_size < BLOCK_SIZE {
-                        peer.send_request(downloading_piece.piece.unwrap(), downloading_piece.offset, remaining_piece_size)?;
+                        peer.send_request(downloading_piece.piece.unwrap(), downloading_piece.offset, remaining_piece_size).await?;
                     } else {
-                        peer.send_request(downloading_piece.piece.unwrap(), downloading_piece.offset, BLOCK_SIZE)?;
+                        peer.send_request(downloading_piece.piece.unwrap(), downloading_piece.offset, BLOCK_SIZE).await?;
                     }
                 }
             }
@@ -336,14 +328,14 @@ fn handle_peer(address: SocketAddr, info_hash: [u8; 20], peer_id: [u8; 20], piec
                 peer.update_piece(piece_index as usize);
 
                 if !peer.am_interested() && get_next_piece(&peer, &file_bitfield, &currently_downloading).is_some() {
-                    peer.send_interested()?;
+                    peer.send_interested().await?;
                 }
             }
             Message::Bitfield(bitfield) => {
                 peer.update_bitfield(bitfield);
 
                 if !peer.am_interested() && get_next_piece(&peer, &file_bitfield, &currently_downloading).is_some() {
-                    peer.send_interested()?;
+                    peer.send_interested().await?;
                 }
             }
             Message::Request { index, begin, length } => (), // peer.send_piece(index, begin, length)?,
@@ -368,7 +360,7 @@ fn handle_peer(address: SocketAddr, info_hash: [u8; 20], peer_id: [u8; 20], piec
 
                         currently_downloading.write().unwrap().insert(next_piece);
   
-                        peer.send_request(next_piece, 0, BLOCK_SIZE)?;
+                        peer.send_request(next_piece, 0, BLOCK_SIZE).await?;
                     } else {
                         // no more pieces needed
                         return Ok(());
@@ -378,10 +370,10 @@ fn handle_peer(address: SocketAddr, info_hash: [u8; 20], peer_id: [u8; 20], piec
                 // Check if the remaining size is less than the block size
                 else if remaining_piece_size < BLOCK_SIZE {
                     // request a smaller block to finish the piece
-                    peer.send_request(downloading_piece.piece.unwrap(), downloading_piece.offset, remaining_piece_size)?;
+                    peer.send_request(downloading_piece.piece.unwrap(), downloading_piece.offset, remaining_piece_size).await?;
                 } else {
                     // Otherwise, request the next block as usual
-                    peer.send_request(downloading_piece.piece.unwrap(), downloading_piece.offset, BLOCK_SIZE)?;
+                    peer.send_request(downloading_piece.piece.unwrap(), downloading_piece.offset, BLOCK_SIZE).await?;
                 }
             }
             Message::Cancel { index, begin, length } => (), // todo (cancels previouslly requested piece)
