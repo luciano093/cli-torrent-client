@@ -32,6 +32,7 @@ impl From<io::Error> for Error {
     }
 }
 
+#[derive(Debug)]
 pub struct WriteMessage {
     index: u32,
     begin: u32,

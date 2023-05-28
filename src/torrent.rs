@@ -2,12 +2,13 @@ use std::net::SocketAddr;
 use std::collections::{HashSet, HashMap};
 use std::io::{stdout, Write};
 use std::fmt::Display;
-use std::sync::{Arc, RwLock, mpsc};
+use std::sync::Arc;
 
 use bit_vec::BitVec;
 use tokio::fs::OpenOptions;
 use tokio::io::{AsyncSeekExt, AsyncWriteExt, BufWriter};
 use tokio::net::TcpStream;
+use tokio::sync::{RwLock, mpsc};
 
 use crate::metainfo::{self, MetaInfo, FileMode};
 use crate::tracker::{Tracker, self, TrackerRequest, Peers};
@@ -68,7 +69,13 @@ impl Drop for DownloadingPiece {
     fn drop(&mut self) {
         if let Some(piece) = self.piece {
             println!("dropping {}", piece);
-            self.currently_downloading.write().unwrap().remove(&piece);
+
+            let downloading_piece = Arc::clone(&self.currently_downloading);
+
+            tokio::spawn(async move {
+                downloading_piece.write().await.remove(&piece);
+            });
+            
         }
     }
 }
@@ -141,9 +148,9 @@ impl Torrent {
     pub async fn download(&mut self) {
         let mut file_len = 0;
 
-        let (sender, reciever) = mpsc::channel::<WriteMessage>();
+        let (sender, mut reciever) = mpsc::channel::<WriteMessage>(1000);
 
-        println!("pieces: {}, piece length: {}", self.file_bitfield.read().unwrap().len(), self.metainfo.info().piece_length());
+        println!("pieces: {}, piece length: {}", self.file_bitfield.read().await.len(), self.metainfo.info().piece_length());
         if let FileMode::SingleFile { length, .. } = self.metainfo.info().mode() {
             println!("file len: {}", length);
             file_len = *length;
@@ -153,7 +160,7 @@ impl Torrent {
 
         let last_piece_length = get_last_piece_length(file_len as usize, self.metainfo.info().pieces().len(), self.metainfo.info().piece_length() as usize);
 
-        let mut file = OpenOptions::new()
+        let file = OpenOptions::new()
             .read(false)
             .write(true)
             .create(true)
@@ -182,7 +189,7 @@ impl Torrent {
                 pieces.insert(i as u32, Vec::new());
             }
 
-            for write_message in reciever {
+            while let Some(write_message) = reciever.recv().await {
                 let piece_buffer = pieces.get_mut(&write_message.index()).unwrap();
 
                 // allocates needed size for slice copy
@@ -197,7 +204,7 @@ impl Torrent {
 
                 if received_blocks[&write_message.index()].all() {
                     println!("piece {} completed", write_message.index());
-                    bitfield.write().unwrap().set(write_message.index() as usize, true);
+                    bitfield.write().await.set(write_message.index() as usize, true);
 
                     // write to file
                     let offset = write_message.index() as u64 * piece_length as u64;
@@ -211,7 +218,7 @@ impl Torrent {
         });
 
         'main: loop {
-            if self.file_bitfield.read().unwrap().all() {
+            if self.file_bitfield.read().await.all() {
                 println!("Download finished");
                 break;
             }
@@ -222,13 +229,13 @@ impl Torrent {
             match self.tracker.response().unwrap().peers() {
                 Peers::Binary(peers) => {
                     for &addr in peers.iter() {
-                        if self.file_bitfield.read().unwrap().all() {
+                        if self.file_bitfield.read().await.all() {
                             println!("Download finished");
                             break 'main;
                         }
 
                         // skip if peer is already connected
-                        if self.connected_peers.read().unwrap().contains(&addr) {
+                        if self.connected_peers.read().await.contains(&addr) {
                             continue;
                         }
 
@@ -250,12 +257,12 @@ impl Torrent {
                                 },
                             };
 
-                            connected_peers.write().unwrap().remove(&addr);
+                            connected_peers.write().await.remove(&addr);
                         };
 
                         //connection();
 
-                        self.connected_peers.write().unwrap().insert(addr);
+                        self.connected_peers.write().await.insert(addr);
                         tokio::spawn(connection);
                     }
                 },
@@ -279,7 +286,7 @@ impl Torrent {
 
 async fn handle_peer(address: SocketAddr, info_hash: [u8; 20], peer_id: [u8; 20], piece_length: u32, last_piece_length: u32, file_bitfield: Arc<RwLock<BitVec>>, currently_downloading: Arc<RwLock<HashSet<u32>>>, sender: mpsc::Sender<WriteMessage>) -> Result<(), Error> {
     // connects and sends handshake
-    let pieces = file_bitfield.read().unwrap().len();
+    let pieces = file_bitfield.read().await.len();
 
     let mut stream = match TcpStream::connect(address).await {
         Ok(stream) => stream,
@@ -298,7 +305,7 @@ async fn handle_peer(address: SocketAddr, info_hash: [u8; 20], peer_id: [u8; 20]
         match message {
             Message::KeepAlive => {
                 // closes connection if peer has no piece the file needs
-                if get_next_piece(&peer, &file_bitfield, &currently_downloading).is_none() {
+                if get_next_piece(&peer, &file_bitfield, &currently_downloading).await.is_none() {
                     return Ok(());
                 }
             },
@@ -314,9 +321,9 @@ async fn handle_peer(address: SocketAddr, info_hash: [u8; 20], peer_id: [u8; 20]
                 peer.set_is_choking(false);
 
                 if downloading_piece.piece.is_none() {
-                    if let Some(next_piece) = get_next_piece(&peer, &file_bitfield, &currently_downloading) {
+                    if let Some(next_piece) = get_next_piece(&peer, &file_bitfield, &currently_downloading).await {
                         downloading_piece.piece = Some(next_piece);
-                        currently_downloading.write().unwrap().insert(next_piece);
+                        currently_downloading.write().await.insert(next_piece);
 
                         peer.send_request(next_piece, downloading_piece.offset, BLOCK_SIZE).await?;
                     } else {
@@ -345,20 +352,20 @@ async fn handle_peer(address: SocketAddr, info_hash: [u8; 20], peer_id: [u8; 20]
             Message::Have(piece_index) => {
                 peer.update_piece(piece_index as usize);
 
-                if !peer.am_interested() && get_next_piece(&peer, &file_bitfield, &currently_downloading).is_some() {
+                if !peer.am_interested() && get_next_piece(&peer, &file_bitfield, &currently_downloading).await.is_some() {
                     peer.send_interested().await?;
                 }
             }
             Message::Bitfield(bitfield) => {
                 peer.update_bitfield(bitfield);
 
-                if !peer.am_interested() && get_next_piece(&peer, &file_bitfield, &currently_downloading).is_some() {
+                if !peer.am_interested() && get_next_piece(&peer, &file_bitfield, &currently_downloading).await.is_some() {
                     peer.send_interested().await?;
                 }
             }
             Message::Request { index, begin, length } => (), // peer.send_piece(index, begin, length)?,
             Message::Piece { index, begin, block } => {
-                sender.send(WriteMessage::new(index, begin, &block)).unwrap();
+                sender.send(WriteMessage::new(index, begin, &block)).await.unwrap();
 
                 downloading_piece.offset += block.len() as u32;
 
@@ -373,10 +380,10 @@ async fn handle_peer(address: SocketAddr, info_hash: [u8; 20], peer_id: [u8; 20]
                     downloading_piece.offset = 0;
 
                     // Request the next piece
-                    if let Some(next_piece) = get_next_piece(&peer, &file_bitfield, &currently_downloading) {
+                    if let Some(next_piece) = get_next_piece(&peer, &file_bitfield, &currently_downloading).await {
                         downloading_piece.piece = Some(next_piece);
 
-                        currently_downloading.write().unwrap().insert(next_piece);
+                        currently_downloading.write().await.insert(next_piece);
   
                         peer.send_request(next_piece, 0, BLOCK_SIZE).await?;
                     } else {
@@ -400,9 +407,9 @@ async fn handle_peer(address: SocketAddr, info_hash: [u8; 20], peer_id: [u8; 20]
     }
 }
 
-fn get_next_piece(peer: &Peer, file_bitfield: &RwLock<BitVec>, currently_downloading: &RwLock<HashSet<u32>>) -> Option<u32> {
-    let file_bitfield = file_bitfield.read().unwrap();
-    let currently_downloading = currently_downloading.read().unwrap();
+async fn get_next_piece(peer: &Peer<'_>, file_bitfield: &RwLock<BitVec>, currently_downloading: &RwLock<HashSet<u32>>) -> Option<u32> {
+    let file_bitfield = file_bitfield.read().await;
+    let currently_downloading = currently_downloading.read().await;
 
     // Iterate over each piece in the file's bitfield.
     for (index, exists) in file_bitfield.iter().enumerate() {

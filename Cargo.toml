@@ -12,4 +12,4 @@ rand = "0.8.5"
 sha1 = "0.10.5"
 url = "2.3.1"
 bit-vec = "0.6.3"
-tokio = { version = "1.28.1", features = ["macros", "rt-multi-thread", "net", "io-util", "fs"] }
+tokio = { version = "1.28.1", features = ["macros", "rt-multi-thread", "net", "io-util", "fs", "sync"] }
