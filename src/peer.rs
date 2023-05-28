@@ -213,10 +213,7 @@ impl<'a> Peer<'a> {
 
     pub async fn read_message(&mut self) -> Result<Message, Error> {
         // read length of message
-        let mut len = [0u8; 4];
-        self.reader.read_exact(&mut len).await?;
-    
-        let len = u32::from_be_bytes(len);
+        let len = self.reader.read_u32().await?;
 
         // If len is 0, it's a keep-alive message
         if len == 0 {
