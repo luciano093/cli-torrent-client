@@ -6,7 +6,7 @@ use std::sync::{Arc, RwLock, mpsc};
 
 use bit_vec::BitVec;
 use tokio::fs::OpenOptions;
-use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+use tokio::io::{AsyncSeekExt, AsyncWriteExt, BufWriter};
 use tokio::net::TcpStream;
 
 use crate::metainfo::{self, MetaInfo, FileMode};
@@ -166,7 +166,10 @@ impl Torrent {
         let piece_length = self.metainfo.info().piece_length();
 
         tokio::spawn(async move {
-            let mut pieces = HashMap::<u32, BitVec>::new();
+            let mut file_writer = BufWriter::new(file);
+
+            let mut received_blocks = HashMap::<u32, BitVec>::new();
+            let mut pieces = HashMap::<u32, Vec<u8>>::new();
 
             for i in 0..num_of_pieces {
                 let block_num = if i != num_of_pieces - 1 {
@@ -175,23 +178,34 @@ impl Torrent {
                     (last_piece_length + BLOCK_SIZE - 1) / BLOCK_SIZE // rounds up
                 };
                 
-                pieces.insert(i as u32, BitVec::from_elem(block_num as usize, false));
+                received_blocks.insert(i as u32, BitVec::from_elem(block_num as usize, false));
+                pieces.insert(i as u32, Vec::new());
             }
 
             for write_message in reciever {
-                // write to file
-                let offset = (write_message.index() as u64 * piece_length as u64) + write_message.begin() as u64;
+                let piece_buffer = pieces.get_mut(&write_message.index()).unwrap();
 
-                file.seek(std::io::SeekFrom::Start(offset)).await.unwrap();
-                file.write_all(write_message.block()).await.unwrap();
+                // allocates needed size for slice copy
+                let begin = write_message.begin() as usize;
+                if piece_buffer.len() < begin + write_message.block().len() {
+                    piece_buffer.resize(begin + write_message.block().len(), 0);
+                }
+                piece_buffer[begin..begin + write_message.block().len()].copy_from_slice(write_message.block());
 
                 let block_index = (write_message.begin() as u64 / BLOCK_SIZE as u64) as usize;
-                pieces.get_mut(&write_message.index()).unwrap().set(block_index, true);
+                received_blocks.get_mut(&write_message.index()).unwrap().set(block_index, true);
 
-                if pieces[&write_message.index()].all() {
+                if received_blocks[&write_message.index()].all() {
                     println!("piece {} completed", write_message.index());
                     bitfield.write().unwrap().set(write_message.index() as usize, true);
-                    file.sync_all().await.unwrap();
+
+                    // write to file
+                    let offset = write_message.index() as u64 * piece_length as u64;
+
+                    file_writer.seek(std::io::SeekFrom::Start(offset)).await.unwrap();
+                    file_writer.write_all(&pieces[&write_message.index()]).await.unwrap();
+
+                    pieces.remove(&write_message.index());
                 }
             }
         });
