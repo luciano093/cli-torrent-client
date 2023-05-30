@@ -9,6 +9,7 @@ use tokio::fs::OpenOptions;
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::{RwLock, mpsc};
+use url::Url;
 
 use crate::metainfo::{self, MetaInfo, FileMode};
 use crate::tracker::{Tracker, self, TrackerRequest, Peers};
@@ -87,7 +88,6 @@ impl Drop for DownloadingPiece {
 pub struct Torrent {
     peer_id: [u8; 20],
     metainfo: MetaInfo,
-    tracker: Tracker,
     connected_peers: Arc<RwLock<HashSet<SocketAddr>>>,
     file_bitfield: Arc<RwLock<BitVec>>,
     available_pieces: Arc<RwLock<HashSet<u32>>>,
@@ -95,12 +95,13 @@ pub struct Torrent {
 
 impl Torrent {
     /// Creates a new torrent and connects to the first tracker given by the metainfo
-    pub async fn new(torrent: &str) -> Result<Self, Error> {
+    pub async fn new(torrent: &str) -> Result<Torrent, Error> {
         let metainfo = MetaInfo::try_from(torrent)?;
 
+        // todo move this into download function
         // calculate how many bytes the torrent needs to download
         // TODO: increase limit (around 3GB right now)
-        let length = match metainfo.info().mode() {
+        let _length = match metainfo.info().mode() {
             FileMode::SingleFile { length, .. } => {
 
                 *length as u128
@@ -122,19 +123,6 @@ impl Torrent {
             peer_id[i] = *char;
         }
 
-        let request = TrackerRequest::new(
-            *metainfo.info_hash(),
-            peer_id,
-            6881,
-            0,
-            0,
-            length,
-            true,
-            false
-        );
-
-        let tracker = Tracker::connect(metainfo.announce(), &request).await?;
-
         let file_bitfield = Arc::new(RwLock::new(BitVec::from_elem(metainfo.info().pieces().len(), false)));
 
         let mut available_pieces = HashSet::new();
@@ -146,7 +134,6 @@ impl Torrent {
         Ok(Torrent {
             peer_id,
             metainfo,
-            tracker,
             connected_peers: Arc::new(RwLock::new(HashSet::new())),
             file_bitfield,
             available_pieces: Arc::new(RwLock::new(available_pieces)),
@@ -156,13 +143,32 @@ impl Torrent {
     pub async fn download(&mut self) {
         let mut file_len = 0;
 
-        let (sender, mut reciever) = mpsc::channel::<WriteMessage>(1000);
-
-        println!("pieces: {}, piece length: {}", self.metainfo.info().pieces().len(), self.metainfo.info().piece_length());
         if let FileMode::SingleFile { length, .. } = self.metainfo.info().mode() {
             println!("file len: {}", length);
             file_len = *length;
         }
+
+        let request = TrackerRequest::new(
+            *self.metainfo.info_hash(),
+            self.peer_id,
+            6881,
+            0,
+            0,
+            file_len.into(),
+            true,
+            false
+        );
+
+        let url = Url::parse(self.metainfo.announce()).unwrap();
+        let tracker_address = url.socket_addrs(|| None).unwrap()[0];
+        let mut tracker_stream = TcpStream::connect(tracker_address).await.unwrap();
+
+        let mut tracker = Tracker::new(&mut tracker_stream, &url, &request).await.unwrap();
+
+        let (sender, mut reciever) = mpsc::channel::<WriteMessage>(1000);
+
+        println!("pieces: {}, piece length: {}", self.metainfo.info().pieces().len(), self.metainfo.info().piece_length());
+        
 
         let num_of_pieces = self.metainfo.info().pieces().len();
 
@@ -221,10 +227,13 @@ impl Torrent {
                 break;
             }
 
-            self.tracker.announce().await.unwrap();
+            // todo handle errors
+            if let Err(_err) = tracker.announce().await {
+                continue;
+            }
 
             // handle each peer deparately in its own thread
-            match self.tracker.response().unwrap().peers() {
+            match tracker.response().unwrap().peers() {
                 Peers::Binary(peers) => {
                     for &addr in peers.iter() {
                         if self.file_bitfield.read().await.all() {
@@ -297,6 +306,7 @@ async fn handle_peer(address: SocketAddr, info_hash: [u8; 20], peer_id: [u8; 20]
     let _peer_handshake = peer.handshake(info_hash, peer_id).await?;
 
     loop {
+        // possibly makes all slow when not handling stuck peers
         let message = peer.read_message().await?;
         // println!("piece: {:?}, offset: {:?}, message: {}", downloading_piece.piece, downloading_piece.offset, message);
 
@@ -409,6 +419,10 @@ async fn get_next_piece(peer: &Peer<'_>, available_pieces: &RwLock<HashSet<u32>>
     for (piece, exists) in peer.bitfield().iter().enumerate() {
         let piece = piece as u32;
         if exists && available_pieces.get(&piece).is_some() {
+            if piece == 396 {
+                std::process::exit(0);
+            }
+
             // Remove the piece from the available pieces and return it.
             available_pieces.remove(&piece);
             return Some(piece);

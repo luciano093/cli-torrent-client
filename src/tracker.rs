@@ -2,8 +2,9 @@ use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, IpAddr};
 use std::io::{self, Write, Cursor};
 use std::str::from_utf8;
 
-use tokio::io::{AsyncWriteExt, AsyncReadExt};
+use tokio::io::{AsyncWriteExt, AsyncReadExt, BufReader};
 use tokio::net::TcpStream;
+use tokio::net::tcp::{ReadHalf, WriteHalf};
 use url::Url;
 
 use crate::bencode::{FromBencode, self, Bedecode, Type, FromBencodeType};
@@ -21,6 +22,7 @@ pub enum Error {
     MissingPeerId,
     MissingPeerIp,
     MissingPeerPort,
+    EmptyResponse,
 }
 
 impl std::fmt::Display for Error {
@@ -325,48 +327,36 @@ impl FromBencode for TrackerResponse {
     }
 }
 
-pub struct Tracker {
-    stream: TcpStream,
+pub struct Tracker<'a> {
+    reader: BufReader<ReadHalf<'a>>,
+    writer: WriteHalf<'a>,
     response: Option<TrackerResponse>,
     request: Vec<u8>,
 }
 
-impl Tracker {
-    pub async fn connect(url: &str, request: &TrackerRequest) -> Result<Tracker, Error> {
-        // connects to tracker
-        let url = Url::parse(url)?;
-
-        let tracker_address = url.socket_addrs(|| None)?[0];
-
-        let stream = TcpStream::connect(tracker_address).await?;
+impl<'a> Tracker<'a> {
+    pub async fn new(stream: &'a mut TcpStream, url: &Url, request: &TrackerRequest) -> Result<Tracker<'a>, Error> {
+        let (reader, writer) = stream.split();
+        let reader = BufReader::new(reader);
 
         // creates request
         let host = &format!("{}:{}", url.host_str().unwrap(), url.port_or_known_default().unwrap());
         println!("host: {}", host);
         let request = request.create_request(url.path(), host);
 
-        Ok(Tracker { stream, response: None, request })
+        Ok(Tracker { reader, writer, response: None, request })
     }
 
     pub async fn announce(&mut self) -> Result<(), Error> {
-        loop {
             // writes request
-            match self.stream.write_all(&self.request).await {
-                Err(err) if err.kind() == io::ErrorKind::ConnectionReset || err.kind() == io::ErrorKind::ConnectionAborted || err.kind() == io::ErrorKind::PermissionDenied => {
-                    println!("reconnecting");
-                    self.stream = TcpStream::connect(self.stream.peer_addr().unwrap()).await?;
-                    continue;
-                }
-                Err(err) => return Err(err.into()),
-                _ => (),
-            };
+            self.writer.write_all(&self.request).await?;
 
             // reads response
             let mut response = Vec::new();
-            let result = self.stream.split().0.read_to_end(&mut response).await;
+            let result = self.reader.read_to_end(&mut response).await;
 
             match result {
-                Ok(byte_count) => if byte_count != 0 {
+                Ok(byte_count) if byte_count != 0 =>  {
                     self.response = match TrackerResponse::from_bencode(&response) {
                         Ok(response) => Some(response),
                         Err(err) => {
@@ -374,29 +364,12 @@ impl Tracker {
                             todo!()
                         },
                     };
-
-                    break;
                 },
-                Err(err) if err.kind() == io::ErrorKind::ConnectionReset => {
-                    println!("reconnecting");
-                    self.stream = TcpStream::connect(self.stream.peer_addr().unwrap()).await?;
-                    continue;
-                }
-                Err(err) if err.kind() == io::ErrorKind::TimedOut => {
-                    continue;
-                }
-                Err(err) => {
-                    eprintln!("{:?}", err);
-                    continue;
-                }
+                Ok(_) => return Err(Error::EmptyResponse),
+                Err(err) => return Err(err.into()),
             }
-        }
 
         Ok(())
-    }
-
-    pub const fn stream(&self) -> &TcpStream {
-        &self.stream
     }
 
     pub const fn response(&self) -> Option<&TrackerResponse> {
