@@ -1,5 +1,5 @@
 use std::net::SocketAddr;
-use std::collections::{HashSet, HashMap};
+use std::collections::HashSet;
 use std::io::{stdout, Write};
 use std::fmt::Display;
 use std::sync::Arc;
@@ -158,7 +158,7 @@ impl Torrent {
 
         let (sender, mut reciever) = mpsc::channel::<WriteMessage>(1000);
 
-        println!("pieces: {}, piece length: {}", self.file_bitfield.read().await.len(), self.metainfo.info().piece_length());
+        println!("pieces: {}, piece length: {}", self.metainfo.info().pieces().len(), self.metainfo.info().piece_length());
         if let FileMode::SingleFile { length, .. } = self.metainfo.info().mode() {
             println!("file len: {}", length);
             file_len = *length;
@@ -181,22 +181,16 @@ impl Torrent {
         let piece_length = self.metainfo.info().piece_length();
 
         tokio::spawn(async move {
-            let mut received_blocks = HashMap::<u32, BitVec>::new();
-            let mut pieces = HashMap::<u32, Vec<u8>>::new();
+            let block_num = (piece_length + BLOCK_SIZE - 1) / BLOCK_SIZE; // rounds up
+            let last_block_num = (last_piece_length + BLOCK_SIZE - 1) / BLOCK_SIZE; // rounds up
 
-            for i in 0..num_of_pieces {
-                let block_num = if i != num_of_pieces - 1 {
-                    (piece_length + BLOCK_SIZE - 1) / BLOCK_SIZE // rounds up
-                } else {
-                    (last_piece_length + BLOCK_SIZE - 1) / BLOCK_SIZE // rounds up
-                };
-                
-                received_blocks.insert(i as u32, BitVec::from_elem(block_num as usize, false));
-                pieces.insert(i as u32, Vec::new());
-            }
+            let mut received_blocks = vec![BitVec::from_elem(block_num as usize, false); num_of_pieces - 1];
+            received_blocks.push(BitVec::from_elem(last_block_num as usize, false));
+
+            let mut pieces = vec![Vec::new(); num_of_pieces];
 
             while let Some(write_message) = reciever.recv().await {
-                let piece_buffer = pieces.get_mut(&write_message.index()).unwrap();
+                let piece_buffer = pieces.get_mut(write_message.index() as usize).unwrap();
 
                 // allocates needed size for slice copy
                 let begin = write_message.begin() as usize;
@@ -206,9 +200,9 @@ impl Torrent {
                 piece_buffer[begin..begin + write_message.block().len()].copy_from_slice(write_message.block());
 
                 let block_index = (write_message.begin() as u64 / BLOCK_SIZE as u64) as usize;
-                received_blocks.get_mut(&write_message.index()).unwrap().set(block_index, true);
+                received_blocks.get_mut(write_message.index() as usize).unwrap().set(block_index, true);
 
-                if received_blocks[&write_message.index()].all() {
+                if received_blocks[write_message.index() as usize].all() {
                     println!("piece {} completed", write_message.index());
                     bitfield.write().await.set(write_message.index() as usize, true);
 
@@ -216,9 +210,7 @@ impl Torrent {
                     let offset = write_message.index() as u64 * piece_length as u64;
 
                     file.seek(std::io::SeekFrom::Start(offset)).await.unwrap();
-                    file.write_all(&pieces[&write_message.index()]).await.unwrap();
-
-                    pieces.remove(&write_message.index());
+                    file.write_all(&pieces[write_message.index() as usize]).await.unwrap();
                 }
             }
         });
